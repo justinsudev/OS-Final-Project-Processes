@@ -17,3 +17,17 @@
 #include <unistd.h>
 
 #define MAX_BOWLS 64
+
+
+/* ---- Configuration ------------------------------------------------------- */
+
+typedef struct {
+    int B;   /* bowls */
+    int C;   /* cats */
+    int M;   /* mice */
+    int F;   /* cat feeding base seconds */
+    int N;   /* cat not-hungry base seconds */
+    int Fm;  /* mouse max feed base seconds */
+    int Nm;  /* mouse not-hungry base seconds */
+    int T;   /* total simulation seconds */
+} Config;
