@@ -318,4 +318,172 @@ static void run_mouse(int id) {
 
     log_event("MOUSE", id, "exiting");
     _exit(0);
+
+}
+static void parent_on_signal(int sig) {
+    (void)sig;
+    if (S) S->stop = 1;
+}
+
+static void cleanup_ipc(void) {
+    if (sem_mutex     != SEM_FAILED) sem_close(sem_mutex);
+    if (sem_no_cats   != SEM_FAILED) sem_close(sem_no_cats);
+    if (sem_bowl_free != SEM_FAILED) sem_close(sem_bowl_free);
+
+    sem_unlink(name_mutex);
+    sem_unlink(name_no_cats);
+    sem_unlink(name_bowl_free);
+
+    if (S) munmap(S, sizeof(SharedState));
+    shm_unlink(name_shm);
+}
+
+static void usage(const char *prog) {
+    fprintf(stderr,
+        "Usage: %s [B C M F N Fm Nm T]\n"
+        "  B  = bowls                              (default 3)\n"
+        "  C  = cats                               (default 4)\n"
+        "  M  = mice                               (default 5)\n"
+        "  F  = cat feeding base seconds           (default 2)\n"
+        "  N  = cat not-hungry base seconds        (default 3)\n"
+        "  Fm = mouse max feed base seconds        (default 2)\n"
+        "  Nm = mouse not-hungry base seconds      (default 2)\n"
+        "  T  = total simulation seconds           (default 30)\n"
+        "All durations are randomized within [base/2, 3*base/2].\n",
+        prog);
+}
+
+int main(int argc, char **argv) {
+    Config cfg = { .B=3, .C=4, .M=5, .F=2, .N=3, .Fm=2, .Nm=2, .T=30 };
+
+    if (argc > 1 && (!strcmp(argv[1], "-h") || !strcmp(argv[1], "--help"))) {
+        usage(argv[0]);
+        return 0;
+    }
+
+    int *fields[] = { &cfg.B, &cfg.C, &cfg.M, &cfg.F, &cfg.N,
+                      &cfg.Fm, &cfg.Nm, &cfg.T };
+    const int nf = (int)(sizeof fields / sizeof fields[0]);
+    for (int i = 1; i < argc && (i - 1) < nf; i++) {
+        *fields[i - 1] = atoi(argv[i]);
+    }
+
+    if (cfg.B < 1 || cfg.B > MAX_BOWLS) {
+        fprintf(stderr, "B must be between 1 and %d\n", MAX_BOWLS);
+        return 1;
+    }
+    if (cfg.C < 0 || cfg.M < 0 || cfg.T < 1) {
+        fprintf(stderr, "Invalid parameters (C>=0, M>=0, T>=1).\n");
+        return 1;
+    }
+    if (cfg.C + cfg.M == 0) {
+        fprintf(stderr, "Nothing to simulate (C=0 and M=0).\n");
+        return 1;
+    }
+
+    pid_t pid = getpid();
+    snprintf(name_shm,       sizeof name_shm,       "/catlady_shm_%d",      pid);
+    snprintf(name_mutex,     sizeof name_mutex,     "/catlady_mtx_%d",      pid);
+    snprintf(name_no_cats,   sizeof name_no_cats,   "/catlady_nocats_%d",   pid);
+    snprintf(name_bowl_free, sizeof name_bowl_free, "/catlady_bowlfree_%d", pid);
+
+    shm_unlink(name_shm);
+    int fd = shm_open(name_shm, O_CREAT | O_EXCL | O_RDWR, 0600);
+    if (fd < 0) die("shm_open");
+    if (ftruncate(fd, (off_t)sizeof(SharedState)) < 0) die("ftruncate");
+    S = mmap(NULL, sizeof(SharedState), PROT_READ | PROT_WRITE,
+             MAP_SHARED, fd, 0);
+    if (S == MAP_FAILED) die("mmap");
+    close(fd);
+
+    memset(S, 0, sizeof *S);
+    S->B  = cfg.B;  S->C = cfg.C;  S->M = cfg.M;
+    S->F  = cfg.F;  S->N = cfg.N;
+    S->Fm = cfg.Fm; S->Nm = cfg.Nm;
+    clock_gettime(CLOCK_MONOTONIC, &S->t0);
+
+    sem_mutex     = sem_open_create(name_mutex,     1);
+    sem_no_cats   = sem_open_create(name_no_cats,   0);
+    sem_bowl_free = sem_open_create(name_bowl_free, 0);
+
+    log_event("SIM", -1,
+              "starting  B=%d C=%d M=%d F=%d N=%d Fm=%d Nm=%d T=%d (pid=%d)",
+              cfg.B, cfg.C, cfg.M, cfg.F, cfg.N, cfg.Fm, cfg.Nm, cfg.T, pid);
+
+    struct sigaction sa;
+    memset(&sa, 0, sizeof sa);
+    sa.sa_handler = parent_on_signal;
+    sigemptyset(&sa.sa_mask);
+    sigaction(SIGINT,  &sa, NULL);
+    sigaction(SIGTERM, &sa, NULL);
+    sigaction(SIGALRM, &sa, NULL);
+
+    int total = cfg.C + cfg.M;
+    pid_t *children = calloc((size_t)total, sizeof(pid_t));
+    if (!children) die("calloc");
+    int nchild = 0;
+
+    for (int i = 1; i <= cfg.C; i++) {
+        pid_t p = fork();
+        if (p < 0) die("fork(cat)");
+        if (p == 0) run_cat(i);
+        children[nchild++] = p;
+    }
+    for (int i = 1; i <= cfg.M; i++) {
+        pid_t p = fork();
+        if (p < 0) die("fork(mouse)");
+        if (p == 0) run_mouse(i);
+        children[nchild++] = p;
+    }
+
+    alarm((unsigned)cfg.T);
+    unsigned remaining = (unsigned)cfg.T;
+    while (!S->stop && remaining > 0) {
+        remaining = sleep(remaining);
+    }
+    S->stop = 1;
+
+    log_event("SIM", -1, "stopping simulation, waking blocked children...");
+
+    int wake_n = total + cfg.B + 8;
+    for (int i = 0; i < wake_n; i++) {
+        (void)sem_post(sem_no_cats);
+        (void)sem_post(sem_bowl_free);
+    }
+
+    struct timespec grace = {0, 300L * 1000000L};
+    (void)nanosleep(&grace, NULL);
+
+    int reaped = 0;
+    for (int attempt = 0; attempt < 3 && reaped < nchild; attempt++) {
+        for (int i = 0; i < nchild; i++) {
+            if (children[i] <= 0) continue;
+            int st;
+            pid_t r = waitpid(children[i], &st, WNOHANG);
+            if (r > 0) {
+                children[i] = -1;
+                reaped++;
+            }
+        }
+        if (reaped == nchild) break;
+        for (int i = 0; i < nchild; i++) {
+            if (children[i] > 0) {
+                kill(children[i], attempt == 0 ? SIGTERM : SIGKILL);
+            }
+        }
+        struct timespec t = {0, 200L * 1000000L};
+        (void)nanosleep(&t, NULL);
+    }
+    for (int i = 0; i < nchild; i++) {
+        if (children[i] > 0) {
+            if (waitpid(children[i], NULL, 0) > 0) reaped++;
+        }
+    }
+
+    log_event("SIM", -1,
+              "reaped %d/%d children, cleaning up IPC", reaped, nchild);
+
+    free(children);
+    cleanup_ipc();
+    return 0;
 }
