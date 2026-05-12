@@ -161,3 +161,161 @@ static void child_reset_signals(void) {
     sigaction(SIGTERM, &sa, NULL);
     sigaction(SIGALRM, &sa, NULL);
 }
+
+static void run_cat(int id) {
+    is_parent = 0;
+    child_reset_signals();
+
+    sem_mutex     = sem_open_attach(name_mutex);
+    sem_no_cats   = sem_open_attach(name_no_cats);
+    sem_bowl_free = sem_open_attach(name_bowl_free);
+
+    srand((unsigned)((uintptr_t)getpid() ^ (uintptr_t)(id * 2654435761u)
+                     ^ (uintptr_t)time(NULL)));
+
+    log_event("CAT", id, "born (pid=%d)", (int)getpid());
+
+    while (!S->stop) {
+        int nap = rand_duration_ms(S->N);
+        log_event("CAT", id, "napping for %d ms", nap);
+        interruptible_sleep_ms(nap);
+        if (S->stop) break;
+
+        LOCK();
+        S->active_cats++;
+        log_event("CAT", id,
+                  "hungry (active_cats=%d, feeding_mice=%d)",
+                  S->active_cats, S->feeding_mice);
+
+        int bowl;
+        while ((bowl = find_free_bowl()) < 0 && !S->stop) {
+            log_event("CAT", id, "all bowls busy, waiting");
+            cv_wait(sem_bowl_free, &S->waiting_for_bowl);
+        }
+        if (S->stop) {
+            S->active_cats--;
+            if (S->active_cats == 0)
+                cv_broadcast(sem_no_cats, &S->waiting_mice_for_no_cats);
+            UNLOCK();
+            break;
+        }
+
+        S->bowls[bowl] = +id;
+        log_event("CAT", id, "feeding at bowl %d", bowl);
+        UNLOCK();
+
+        int feed = rand_duration_ms(S->F);
+        interruptible_sleep_ms(feed);
+
+        LOCK();
+        S->bowls[bowl] = 0;
+        S->active_cats--;
+        log_event("CAT", id,
+                  "done eating, bowl %d free (active_cats=%d)",
+                  bowl, S->active_cats);
+
+        cv_broadcast(sem_bowl_free, &S->waiting_for_bowl);
+        if (S->active_cats == 0)
+            cv_broadcast(sem_no_cats, &S->waiting_mice_for_no_cats);
+        UNLOCK();
+    }
+
+    log_event("CAT", id, "exiting");
+    _exit(0);
+}
+
+static void run_mouse(int id) {
+    is_parent = 0;
+    child_reset_signals();
+    sem_mutex     = sem_open_attach(name_mutex);
+    sem_no_cats   = sem_open_attach(name_no_cats);
+    sem_bowl_free = sem_open_attach(name_bowl_free);
+
+    srand((unsigned)((uintptr_t)getpid() ^ (uintptr_t)(id * 2246822519u)
+                     ^ (uintptr_t)time(NULL) ^ 0xA5A5u));
+
+    log_event("MOUSE", id, "born (pid=%d)", (int)getpid());
+
+    const int TICK_MS = 100;
+
+    while (!S->stop) {
+        int nap = rand_duration_ms(S->Nm);
+        log_event("MOUSE", id, "napping for %d ms", nap);
+        interruptible_sleep_ms(nap);
+        if (S->stop) break;
+
+        LOCK();
+        log_event("MOUSE", id,
+                  "hungry (active_cats=%d, feeding_mice=%d)",
+                  S->active_cats, S->feeding_mice);
+
+        int bowl     = -1;
+        int acquired = 0;
+        while (!acquired && !S->stop) {
+            while (S->active_cats > 0 && !S->stop) {
+                log_event("MOUSE", id, "cats in sight, waiting");
+                cv_wait(sem_no_cats, &S->waiting_mice_for_no_cats);
+            }
+            if (S->stop) break;
+
+            bowl = find_free_bowl();
+            if (bowl < 0) {
+                log_event("MOUSE", id,
+                          "all bowls full of mice, waiting for one to leave");
+                cv_wait(sem_bowl_free, &S->waiting_for_bowl);
+                continue;
+            }
+
+            S->bowls[bowl] = -id;
+            S->feeding_mice++;
+            acquired = 1;
+            log_event("MOUSE", id,
+                      "feeding at bowl %d (feeding_mice=%d)",
+                      bowl, S->feeding_mice);
+        }
+        UNLOCK();
+
+        if (!acquired) break;
+
+        int total_ms = rand_duration_ms(S->Fm);
+        int elapsed  = 0;
+        int fled     = 0;
+        while (elapsed < total_ms && !S->stop) {
+            int chunk = (total_ms - elapsed) > TICK_MS
+                          ? TICK_MS : (total_ms - elapsed);
+            struct timespec req = { 0, (long)chunk * 1000000L };
+            (void)nanosleep(&req, NULL);
+            elapsed += chunk;
+
+            LOCK();
+            if (S->active_cats > 0) {
+                log_event("MOUSE", id,
+                          "FLEES from bowl %d (cat in sight, ate %d ms)",
+                          bowl, elapsed);
+                S->bowls[bowl] = 0;
+                S->feeding_mice--;
+                cv_broadcast(sem_bowl_free, &S->waiting_for_bowl);
+                UNLOCK();
+                fled = 1;
+                break;
+            }
+            UNLOCK();
+        }
+
+        if (!fled) {
+            LOCK();
+            if (S->bowls[bowl] == -id) {
+                S->bowls[bowl] = 0;
+                S->feeding_mice--;
+                log_event("MOUSE", id,
+                          "satisfied, bowl %d free (ate %d ms)",
+                          bowl, elapsed);
+                cv_broadcast(sem_bowl_free, &S->waiting_for_bowl);
+            }
+            UNLOCK();
+        }
+    }
+
+    log_event("MOUSE", id, "exiting");
+    _exit(0);
+}
