@@ -51,7 +51,7 @@ static char name_mutex[64];
 static char name_no_cats[64];
 static char name_bowl_free[64];
 
-static int is_parent = 1;  
+static int is_parent = 1;
 
 static void die(const char *what) {
     fprintf(stderr, "FATAL: %s: %s\n", what, strerror(errno));
@@ -142,7 +142,7 @@ static int rand_duration_ms(int base_seconds) {
     if (base_seconds <= 0) return 0;
     int base_ms = base_seconds * 1000;
     int half    = base_ms / 2;
-    int r       = rand() % (base_ms + 1);  
+    int r       = rand() % (base_ms + 1);
     return half + r;
 }
 
@@ -165,7 +165,6 @@ static void child_reset_signals(void) {
 static void run_cat(int id) {
     is_parent = 0;
     child_reset_signals();
-
     sem_mutex     = sem_open_attach(name_mutex);
     sem_no_cats   = sem_open_attach(name_no_cats);
     sem_bowl_free = sem_open_attach(name_bowl_free);
@@ -265,7 +264,6 @@ static void run_mouse(int id) {
                 cv_wait(sem_bowl_free, &S->waiting_for_bowl);
                 continue;
             }
-
             S->bowls[bowl] = -id;
             S->feeding_mice++;
             acquired = 1;
@@ -318,8 +316,8 @@ static void run_mouse(int id) {
 
     log_event("MOUSE", id, "exiting");
     _exit(0);
-
 }
+
 static void parent_on_signal(int sig) {
     (void)sig;
     if (S) S->stop = 1;
