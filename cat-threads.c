@@ -23,3 +23,31 @@ static Bowl bowls[NUM_BOWLS];
 static pthread_mutex_t mtx = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t cats_cv = PTHREAD_COND_INITIALIZER;
 static pthread_cond_t mice_cv = PTHREAD_COND_INITIALIZER;
+
+static int cats_present = 0;
+
+static int rand_ms(int lo, int hi) {
+    return lo + rand() % (hi - lo + 1);
+}
+
+static void sleep_ms(int ms) {
+    usleep(ms * 1000);
+}
+
+static int find_noncat_bowl(void) {
+    for (int i = 0; i < NUM_BOWLS; i++) {
+        if (bowls[i].state != BOWL_CAT) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+static int find_free_bowl(void) {
+    for (int i = 0; i < NUM_BOWLS; i++) {
+        if (bowls[i].state == BOWL_FREE) {
+            return i;
+        }
+    }
+    return -1;
+}
