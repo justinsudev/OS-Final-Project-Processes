@@ -40,8 +40,6 @@ static pthread_mutex_t mtx = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t cv_no_cats = PTHREAD_COND_INITIALIZER;
 static pthread_cond_t cv_bowl_free = PTHREAD_COND_INITIALIZER;
 
-static int is_parent = 1;
-
 static void die(const char *what) {
     perror(what);
     exit(1);
@@ -76,11 +74,11 @@ static void log_event(const char *role, int id, const char *fmt, ...) {
     }
 }
 
-static int rand_duration_ms(int base_seconds) {
+static int rand_duration_ms(int base_seconds, unsigned int *seed) {
     if (base_seconds <= 0) return 0;
     int base_ms = base_seconds * 1000;
     int half    = base_ms / 2;
-    int r       = rand() % (base_ms + 1);
+    int r       = rand_r(seed) % (base_ms + 1);
     return half + r;
 }
 
@@ -133,13 +131,10 @@ static void *run_cat(void *arg) {
                          ^ (uintptr_t)(id * 2654435761u)
                          ^ (uintptr_t)time(NULL));
 
-    is_parent = 0;
-    srand(seed);
-
     log_event("CAT", id, "born");
 
     while (!S->stop) {
-        int nap = rand_duration_ms(S->N);
+        int nap = rand_duration_ms(S->N, &seed);
         log_event("CAT", id, "napping for %d ms", nap);
         interruptible_sleep_ms(nap);
         if (S->stop) break;
@@ -167,7 +162,7 @@ static void *run_cat(void *arg) {
         log_event("CAT", id, "feeding at bowl %d", bowl);
         unlock();
 
-        int feed = rand_duration_ms(S->F);
+        int feed = rand_duration_ms(S->F, &seed);
         interruptible_sleep_ms(feed);
 
         lock();
@@ -199,15 +194,12 @@ static void *run_mouse(void *arg) {
                          ^ (uintptr_t)time(NULL)
                          ^ 0xA5A5u);
 
-    is_parent = 0;
-    srand(seed);
-
     log_event("MOUSE", id, "born");
 
     const int TICK_MS = 100;
 
     while (!S->stop) {
-        int nap = rand_duration_ms(S->Nm);
+        int nap = rand_duration_ms(S->Nm, &seed);
         log_event("MOUSE", id, "napping for %d ms", nap);
         interruptible_sleep_ms(nap);
         if (S->stop) break;
@@ -246,7 +238,7 @@ static void *run_mouse(void *arg) {
         if (S->stop) break;
         if (bowl < 0) continue;
 
-        int total_ms = rand_duration_ms(S->Fm);
+        int total_ms = rand_duration_ms(S->Fm, &seed);
         int elapsed = 0;
         int fled = 0;
 
